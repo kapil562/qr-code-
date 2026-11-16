@@ -2,6 +2,9 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import QRCode from 'qrcode'
 
 const QUIET = 4
+const PAD = 16
+const MAX_QR = 640
+const MIN_QR = 80
 
 export default function App() {
   const [startNum, setStartNum] = useState('722279200')
@@ -11,9 +14,22 @@ export default function App() {
   const [page, setPage] = useState(0)
   const [running, setRunning] = useState(false)
   const [status, setStatus] = useState('')
+  const [stageSize, setStageSize] = useState({ w: 0, h: 0 })
 
   const canvasRef = useRef(null)
+  const stageRef = useRef(null)
   const timerRef = useRef(null)
+  // refs taaki timer ke andar stale closure na aaye
+  const pageRef = useRef(0)
+  const loopRef = useRef(loop)
+  const msRef = useRef(ms)
+
+  useEffect(() => {
+    loopRef.current = loop
+  }, [loop])
+  useEffect(() => {
+    msRef.current = ms
+  }, [ms])
 
   const start = parseInt(startNum, 10)
   const end = parseInt(endNum, 10)
@@ -22,33 +38,49 @@ export default function App() {
 
   const current = valid ? start + Math.min(page, count - 1) : start
 
-  // QR draw
+  // stage ka size track karo (responsive QR size ke liye)
+  useEffect(() => {
+    const stage = stageRef.current
+    if (!stage || typeof ResizeObserver === 'undefined') return
+    const update = () => {
+      const w = stage.clientWidth
+      const h = stage.clientHeight
+      setStageSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }))
+    }
+    const ro = new ResizeObserver(update)
+    ro.observe(stage)
+    update()
+    return () => ro.disconnect()
+  }, [])
+
+  // QR draw — viewport ke hisaab se size
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas || !valid) return
-
-    const text = String(current)
-    QRCode.toCanvas(canvas, text, {
+    if (!canvas || !valid || stageSize.w === 0) return
+    const size = Math.min(Math.min(stageSize.w, stageSize.h) - PAD, MAX_QR)
+    if (size < MIN_QR) return
+    QRCode.toCanvas(canvas, String(current), {
       errorCorrectionLevel: 'M',
       margin: QUIET,
-      width: 560,
+      width: Math.round(size),
       color: { dark: '#000000', light: '#ffffff' },
     }).catch((e) => setStatus('QR error: ' + e.message))
-  }, [current, valid])
+  }, [current, valid, stageSize])
 
   const goTo = useCallback(
     (p) => {
       if (!valid) return
       if (p >= count || p < 0) {
-        if (!loop) {
+        if (!loopRef.current) {
           stopTimer()
           return
         }
         p = ((p % count) + count) % count
       }
+      pageRef.current = p
       setPage(p)
     },
-    [count, loop, valid],
+    [count, valid],
   )
 
   function stopTimer() {
@@ -63,23 +95,24 @@ export default function App() {
     }
     setStatus('')
     setRunning(true)
-    // tick loop
+    // tick loop — pageRef se padho, side-effect updater me mat karo
     const tick = () => {
-      setPage((p) => {
-        let next = p + 1
-        if (next >= count) {
-          if (!loop) {
-            setRunning(false)
-            return p
-          }
-          next = 0
+      let next = pageRef.current + 1
+      if (next >= count) {
+        if (!loopRef.current) {
+          setRunning(false)
+          return // yahan ruko, aage schedule mat karo
         }
-        return next
-      })
-      timerRef.current = setTimeout(tick, Math.max(50, parseInt(ms, 10) || 1000))
+        next = 0
+      }
+      pageRef.current = next
+      setPage(next)
+      const delay = Math.max(50, parseInt(msRef.current, 10) || 1000)
+      timerRef.current = setTimeout(tick, delay)
     }
     clearTimeout(timerRef.current)
-    timerRef.current = setTimeout(tick, Math.max(50, parseInt(ms, 10) || 1000))
+    const delay = Math.max(50, parseInt(msRef.current, 10) || 1000)
+    timerRef.current = setTimeout(tick, delay)
   }
 
   function toggleStart() {
@@ -90,22 +123,24 @@ export default function App() {
   function handleRangeChange(setter, value) {
     setter(value)
     stopTimer()
+    pageRef.current = 0
     setPage(0)
   }
 
   // keyboard
   useEffect(() => {
     const onKey = (e) => {
-      if (e.target.tagName === 'INPUT') return
+      // INPUT/BUTTON par chhodo — Space button ka apna click chalayega
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return
       if (e.code === 'Space') {
         e.preventDefault()
         running ? stopTimer() : startTimer()
       } else if (e.key === 'ArrowLeft') {
         stopTimer()
-        goTo(page - 1)
+        goTo(pageRef.current - 1)
       } else if (e.key === 'ArrowRight') {
         stopTimer()
-        goTo(page + 1)
+        goTo(pageRef.current + 1)
       } else if (e.key.toLowerCase() === 'f') {
         document.fullscreenElement
           ? document.exitFullscreen()
@@ -114,7 +149,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [running, page, goTo])
+  }, [running, goTo])
 
   // cleanup timer
   useEffect(() => () => clearTimeout(timerRef.current), [])
@@ -125,79 +160,91 @@ export default function App() {
     <div className="app">
       <div className="bar" style={{ width: `${progress}%` }} />
 
-      <div className="series">{valid ? current : '—'}</div>
-      <div className="hint">
-        Space = start/stop | ← → = manual | F = fullscreen
-      </div>
+      <header className="top">
+        <div className="series">{valid ? current : '—'}</div>
+        <div className="hint">
+          Space = start/stop | ← → = manual | F = fullscreen
+        </div>
+      </header>
 
-      <div className="stage">
+      <div className="stage" ref={stageRef}>
         <canvas ref={canvasRef} />
       </div>
 
       {status && <div className="status">{status}</div>}
 
       <div className="hud">
-        <div className="field">
-          <label>Series Start</label>
-          <input
-            type="number"
-            value={startNum}
-            onChange={(e) => handleRangeChange(setStartNum, e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <label>Kahan Tak (End)</label>
-          <input
-            type="number"
-            value={endNum}
-            onChange={(e) => handleRangeChange(setEndNum, e.target.value)}
-          />
-        </div>
-        <div className="field">
-          <label>Timer (ms)</label>
-          <input
-            className="small"
-            type="number"
-            min="50"
-            step="50"
-            value={ms}
-            onChange={(e) => setMs(e.target.value)}
-          />
+        <div className="hud-fields">
+          <div className="field">
+            <label htmlFor="startInput">Series Start</label>
+            <input
+              id="startInput"
+              type="number"
+              inputMode="numeric"
+              value={startNum}
+              onChange={(e) => handleRangeChange(setStartNum, e.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="endInput">Kahan Tak (End)</label>
+            <input
+              id="endInput"
+              type="number"
+              inputMode="numeric"
+              value={endNum}
+              onChange={(e) => handleRangeChange(setEndNum, e.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="msInput">Timer (ms)</label>
+            <input
+              id="msInput"
+              className="small"
+              type="number"
+              inputMode="numeric"
+              min="50"
+              step="50"
+              value={ms}
+              onChange={(e) => setMs(e.target.value)}
+            />
+          </div>
         </div>
 
-        <button className={running ? 'stop' : ''} onClick={toggleStart}>
-          {running ? '⏸ Stop' : '▶ Start'}
-        </button>
-        <button
-          className="secondary"
-          onClick={() => {
-            stopTimer()
-            goTo(page - 1)
-          }}
-        >
-          ◀ Prev
-        </button>
-        <button
-          className="secondary"
-          onClick={() => {
-            stopTimer()
-            goTo(page + 1)
-          }}
-        >
-          Next ▶
-        </button>
+        <div className="hud-actions">
+          <button className={running ? 'stop' : ''} onClick={toggleStart}>
+            {running ? '⏸ Stop' : '▶ Start'}
+          </button>
+          <button
+            className="secondary"
+            onClick={() => {
+              stopTimer()
+              goTo(pageRef.current - 1)
+            }}
+          >
+            ◀ Prev
+          </button>
+          <button
+            className="secondary"
+            onClick={() => {
+              stopTimer()
+              goTo(pageRef.current + 1)
+            }}
+          >
+            Next ▶
+          </button>
 
-        <label className="chk">
-          <input
-            type="checkbox"
-            checked={loop}
-            onChange={(e) => setLoop(e.target.checked)}
-          />
-          Loop
-        </label>
+          <label className="chk">
+            <input
+              type="checkbox"
+              checked={loop}
+              onChange={(e) => setLoop(e.target.checked)}
+            />
+            Loop
+          </label>
 
-        <div className="pageInfo">
-          {valid ? `Page ${page + 1} / ${count}` : 'Page — / —'}
+          <div className="pageInfo">
+            {valid ? `Page ${page + 1} / ${count}` : 'Page — / —'}
+          </div>
         </div>
       </div>
     </div>
